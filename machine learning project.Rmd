@@ -1,0 +1,251 @@
+---
+title: "Practical Machine Learning Project"
+author: "Karen Lowe"
+date: "January 21, 2016"
+output: html_document
+---
+
+<!--Data is from http://groupware.les.inf.puc-rio.br/har: Velloso, E.; Bulling, A.; Gellersen, H.; Ugulino, W.; Fuks, H. Qualitative Activity Recognition of Weight Lifting Exercises. Proceedings of 4th International Conference in Cooperation with SIGCHI (Augmented Human '13) . Stuttgart, Germany: ACM SIGCHI, 2013. -->
+
+#Pre-Processing
+
+The following code reads in the full data set and the 20 test cases, that I will call the validation data to differentiate it from the test data that I will create for testing the final model choice.
+```{r}
+library(caret)
+filenameTrain <-"/Users/Karen/Coursera/Machine Learning/pml-training.csv"
+if (!file.exists(filenameTrain)) {
+  fileUrl <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+  dateDownloaded <- date()
+  dateDownloaded
+  download.file(fileUrl, destfile = filenameTrain, method = "curl")  
+}
+filenameTest <-"/Users/Karen/Coursera/Machine Learning/pml-testing.csv"
+if (!file.exists(filenameTest)) {
+  fileUrl <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+  dateDownloaded <- date()
+  dateDownloaded
+  download.file(fileUrl, destfile = filenameTest, method = "curl")  
+}
+
+pmldata <- read.csv(filenameTrain)
+pmldatavalid <- read.csv(filenameTest)
+```
+
+I need to do a lot of data cleaning as there are a lot of NA values, even in the 20 validation cases. Unless I do imputation, there shouldn't be any variables included to train the model for which we don't have values in the validation data.  Looking more carefully, it turns out that the same values that are NA for the validation data are also NA for any rows where `new_window=="no"`. On the other hand, where `new_window == "yes"`, these columns have values and the NAs occur where the `new_window=="no"` rows have values. This is because the rows where `new_window == "yes"` are summary rows with averaged values. As a result, I eliminated any columns in the training data that are NA in the validation data. Also, I eliminated the rows where `new_window == "yes"` in the trainig data. The same columns are eliminated from the validation data so that it retains the same shape as the training data. This is performed in the following code:
+
+```{r}
+good<-(1:ncol(pmldatavalid))[apply(pmldatavalid,2,function (x) sum(!is.na(x))==length(x))]
+pmldata<-pmldata[pmldata$new_window=="no",good]
+pmldatavalid<-pmldatavalid[,good]
+dim(pmldata)
+dim(pmldatavalid)
+```
+
+The following splits the training data using a 70/30 split for data to build the model and data to test the model. 
+```{r}
+set.seed(2183)
+inTrain <- createDataPartition(y=pmldata$classe,
+                              p=0.7, list=FALSE)
+training <- pmldata[inTrain,]
+testing <- pmldata[-inTrain,]
+```
+
+# Exploratory Feature Selection
+
+I looked at some plots of the 4x13 potential features that correspond to the sensor measurements. It's impossible to look at all the interrelations between these, but I did produce pairs plots within logical groupings within each of the 4 sensors.
+
+```{r}
+# First let's look at pairwise within the first 4 variables measured on the belt. The following are copied from help(panel).
+panel.hist <- function(x, ...)
+{
+    usr <- par("usr"); on.exit(par(usr))
+    par(usr = c(usr[1:2], 0, 1.5) )
+    h <- hist(x, plot = FALSE)
+    breaks <- h$breaks; nB <- length(breaks)
+    y <- h$counts; y <- y/max(y)
+    rect(breaks[-nB], 0, breaks[-1], y, col = "cyan", ...)
+}
+panel.cor <- function(x, y, digits = 2, prefix = "", cex.cor, ...)
+{
+    usr <- par("usr"); on.exit(par(usr))
+    par(usr = c(0, 1, 0, 1))
+    r <- abs(cor(x, y))
+    txt <- format(c(r, 0.123456789), digits = digits)[1]
+    txt <- paste0(prefix, txt)
+    if(missing(cex.cor)) cex.cor <- 0.8/strwidth(txt)
+    text(0.5, 0.5, txt, cex = cex.cor * r)
+}
+pairs(training[,c(8:11,60)],upper.panel=panel.cor,diag.panel=panel.hist)
+# The following code produces plots for all of the other variables, however, I am only showing one as an example and have commented out the rest of the code.
+#pairs(training[,c(12:14,60)],upper.panel=panel.cor,diag.panel=panel.hist)
+#pairs(training[,c(15:17,60)],upper.panel=panel.cor,diag.panel=panel.hist)
+#pairs(training[,c(18:20,60)],upper.panel=panel.cor,diag.panel=panel.hist)
+#pairs(training[,c(13+8:11,60)],upper.panel=panel.cor,diag.panel=panel.hist)
+#pairs(training[,c(13+12:14,60)],upper.panel=panel.cor,diag.panel=panel.hist)
+#pairs(training[,c(13+15:17,60)],upper.panel=panel.cor,diag.panel=panel.hist)
+#pairs(training[,c(13+18:20,60)],upper.panel=panel.cor,diag.panel=panel.hist)
+#pairs(training[,c(26+8:11,60)],upper.panel=panel.cor,diag.panel=panel.hist)
+#pairs(training[,c(26+12:14,60)],upper.panel=panel.cor,diag.panel=panel.hist)
+#pairs(training[,c(26+15:17,60)],upper.panel=panel.cor,diag.panel=panel.hist)
+#pairs(training[,c(26+18:20,60)],upper.panel=panel.cor,diag.panel=panel.hist)
+#pairs(training[,c(39+8:11,60)],upper.panel=panel.cor,diag.panel=panel.hist)
+#pairs(training[,c(39+12:14,60)],upper.panel=panel.cor,diag.panel=panel.hist)
+#pairs(training[,c(39+15:17,60)],upper.panel=panel.cor,diag.panel=panel.hist)
+#pairs(training[,c(39+18:20,60)],upper.panel=panel.cor,diag.panel=panel.hist)
+```
+
+After looking at all of these plots, I drew the following conclusions:
+
+* The distribution of many of these measurement values are bimodal, which will not work well for a linear regression model.
+
+* Some of these measurements are very correlated--such as a .98 correlation between `roll_belt` and `total_accel_belt`. This is not a problem for recursive partitioning since the algorithm would likely choose one of the variables or the other, but both could not be used in a linear regression model.
+
+* You can definitely see some differences between the activities and some of these variables. For example, for `roll_belt`, the largest and smallest values are recorded when doing activity E.
+
+* There are also many interesting interrelationships between these variables as evidenced by the clumping patterns shown.
+
+# Preliminary Models
+
+I decided to start with a simple Rpart model using all of the measurement variables. I do not think it makes sense to use the timestamp information or the window variables.
+
+
+```{r}
+library(partykit)
+modFit<-train(classe~.,method="rpart",data=training[,-c(1:7)])
+confusionMatrix(predict(modFit$final,training[,-c(1:7)],type="class"),training$classe)$overall
+mod<-as.party(modFit$final)
+plot(mod)
+```
+
+This model only has a 50% accuracy rate within the training data. However, it combines all users, which I don't think makes sense since the point of the model would ultimately be to tell a particular person they are lifting incorrectly given training measurements from that person. So, next I fit rpart models for each of the 6 users, showing only the model for Adelmo for brevity.
+```{r}
+#Adelmo
+onePerson<-training[training$user_name=="adelmo",-(1:7)]
+modFit<-train(classe~.,method="rpart",data=onePerson)
+confusionMatrix(predict(modFit$final,onePerson,type="class"),onePerson$classe)$overall
+mod<-as.party(modFit$final)
+plot(mod,main="Adelmo")
+#Carlitos
+onePerson<-training[training$user_name=="carlitos",-(1:7)]
+modFit<-train(classe~.,method="rpart",data=onePerson)
+confusionMatrix(predict(modFit$final,onePerson,type="class"),onePerson$classe)$overall
+#mod<-as.party(modFit$final)
+#plot(mod,main="Carlitos")
+#Charles
+onePerson<-training[training$user_name=="charles",-(1:7)]
+modFit<-train(classe~.,method="rpart",data=onePerson)
+confusionMatrix(predict(modFit$final,onePerson,type="class"),onePerson$classe)$overall
+#mod<-as.party(modFit$final)
+#plot(mod,main="Charles")
+#Eurico
+onePerson<-training[training$user_name=="eurico",-(1:7)]
+modFit<-train(classe~.,method="rpart",data=onePerson)
+confusionMatrix(predict(modFit$final,onePerson,type="class"),onePerson$classe)$overall
+#mod<-as.party(modFit$final)
+#plot(mod,main="Eurico")
+#Jeremy
+onePerson<-training[training$user_name=="jeremy",-(1:7)]
+modFit<-train(classe~.,method="rpart",data=onePerson)
+confusionMatrix(predict(modFit$final,onePerson,type="class"),onePerson$classe)$overall
+#mod<-as.party(modFit$final)
+#plot(mod,main="Jeremy")
+```
+
+These models ranged in accuracy from .61 for Jeremy to .80 for Eurico and Charles, quite an improvement from .49, but still not that great. Then I decided to use random forests, but to build models again within each person. I considered spliting the testing/training by person, but after checking that about 30% is in there by person I think it's okay.
+
+# Final Model Selection: Random Forests within each of 6 users
+
+The following is the code that produces these models.  However, given the long running time, I saved these models and will reload them here as I create the html file. So this code is not executed.
+
+Because I'm using random forests, cross-validation is done automatically by the method. This means the accuracies listed here are unbiased estimates of the out of sample error for each of the models within each person. However, since I also held out a test set, I will combine the models into one model and use the test set to re-estimate a combined out of sample error.
+```{r}
+library(randomForest)
+onePerson<-training[training$user_name=="adelmo",-(1:7)]
+#adelmoFit<-train(classe~.,method="rf",data=onePerson,prox=TRUE)
+#save(adelmoFit,file="adelmoFit.Rdata")
+load("/Users/Karen/adelmoFit.Rdata")
+confusionMatrix(predict(adelmoFit$final,onePerson,type="class"),onePerson$classe)$overall
+
+onePerson<-training[training$user_name=="carlitos",-(1:7)]
+#carlitosFit<-train(classe~.,method="rf",data=onePerson,prox=TRUE)
+#save(carlitosFit,file="carlitosFit.Rdata")
+load("/Users/Karen/carlitosFit.Rdata")
+confusionMatrix(predict(carlitosFit$final,onePerson,type="class"),onePerson$classe)$overall
+
+onePerson<-training[training$user_name=="charles",-(1:7)]
+#charlesFit<-train(classe~.,method="rf",data=onePerson,prox=TRUE)
+#save(charlesFit,file="charlesFit.Rdata")
+load("/Users/Karen/charlesFit.Rdata")
+confusionMatrix(predict(charlesFit$final,onePerson,type="class"),onePerson$classe)$overall
+
+
+onePerson<-training[training$user_name=="eurico",-(1:7)]
+#euricoFit<-train(classe~.,method="rf",data=onePerson,prox=TRUE)
+#save(euricoFit,file="euriocFit.Rdata")
+load("/Users/Karen/euriocFit.Rdata")
+confusionMatrix(predict(euricoFit$final,onePerson,type="class"),onePerson$classe)$overall
+
+
+onePerson<-training[training$user_name=="jeremy",-(1:7)]
+#jeremyFit<-train(classe~.,method="rf",data=onePerson,prox=TRUE)
+#save(jeremyFit,file="jeremyFit.Rdata")
+load("/Users/Karen/jeremyFit.Rdata")
+confusionMatrix(predict(jeremyFit$final,onePerson,type="class"),onePerson$classe)$overall
+
+onePerson<-training[training$user_name=="pedro",-(1:7)]
+#pedroFit<-train(classe~.,method="rf",data=onePerson,prox=TRUE)
+#save(pedroFit,file="pedroFit.Rdata")
+load("/Users/Karen/pedroFit.Rdata")
+confusionMatrix(predict(pedroFit$final,onePerson,type="class"),onePerson$classe)$overall
+
+```
+
+# The estimate of out of sample error
+All of the accuracies for the models within people are better than 99%. Because the method of random forests automatically does cross-validation, these are unbiased estimates of the out of sample error. However, since I held out a test set, I will also estimate a combined out of sample error for the 6 models combined. This is shown in the following code. 
+
+```{r}
+predictions<-data.frame(X = 1:nrow(testing),prediction=factor(x = rep("A",nrow(testing)), levels=c("A","B","C","D","E")))
+onePersonTest<-testing[testing$user_name=="adelmo",-(1:7)]
+predictions[testing$user_name=="adelmo",2]<-predict(adelmoFit$final,onePersonTest,type="class")
+
+onePersonTest<-testing[testing$user_name=="carlitos",-(1:7)]
+predictions[testing$user_name=="carlitos",2]<-predict(carlitosFit$final,onePersonTest,type="class")
+
+onePersonTest<-testing[testing$user_name=="charles",-(1:7)]
+predictions[testing$user_name=="charles",2]<-predict(charlesFit$final,onePersonTest,type="class")
+
+onePersonTest<-testing[testing$user_name=="eurico",-(1:7)]
+predictions[testing$user_name=="eurico",2]<-predict(euricoFit$final,onePersonTest,type="class")
+
+onePersonTest<-testing[testing$user_name=="jeremy",-(1:7)]
+predictions[testing$user_name=="jeremy",2]<-predict(jeremyFit$final,onePersonTest,type="class")
+
+onePersonTest<-testing[testing$user_name=="pedro",-(1:7)]
+predictions[testing$user_name=="pedro",2]<-predict(pedroFit$final,onePersonTest,type="class")
+
+confusionMatrix(predictions$prediction,testing$class)$overall
+```
+The overall estimate of the out of sample error for this model is .997.  This is so high, I will stop trying to refine the model and proceed to the evaluation of the validation set (i.e., the 20 quiz questions).
+
+
+# Prediction on 20 "test" cases. 
+Now to test on the test cases that I'm calling the validation data. I commented out the printing of predictions for this report because I wasn't sure if this would be tantamount to printing the quiz answers. This model received a 20/20 on the quiz.
+
+```{r}
+adelmovalid<-pmldatavalid[pmldatavalid$user_name=="adelmo",-(1:7)]
+carlitosvalid<-pmldatavalid[pmldatavalid$user_name=="carlitos",-(1:7)]
+charlesvalid<-pmldatavalid[pmldatavalid$user_name=="charles",-(1:7)]
+euricovalid<-pmldatavalid[pmldatavalid$user_name=="eurico",-(1:7)]
+jeremyvalid<-pmldatavalid[pmldatavalid$user_name=="jeremy",-(1:7)]
+pedrovalid<-pmldatavalid[pmldatavalid$user_name=="pedro",-(1:7)]
+
+predictions<-data.frame(id=1:20,prediction=as.factor(c("A","B","C","D","E")))
+predictions[adelmovalid$problem_id,2]<-predict(adelmoFit$final,adelmovalid,type="class")
+predictions[carlitosvalid$problem_id,2]<-predict(carlitosFit$final,carlitosvalid,type="class")
+predictions[charlesvalid$problem_id,2]<-predict(charlesFit$final,charlesvalid,type="class")
+predictions[euricovalid$problem_id,2]<-predict(euricoFit$final,euricovalid,type="class")
+predictions[jeremyvalid$problem_id,2]<-predict(jeremyFit$final,jeremyvalid,type="class")
+predictions[pedrovalid$problem_id,2]<-predict(pedroFit$final,pedrovalid,type="class")
+#predictions
+```
+
